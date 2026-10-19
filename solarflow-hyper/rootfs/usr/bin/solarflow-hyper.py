@@ -35,6 +35,8 @@ OUTPUT_PREFIX = os.environ.get("OUTPUT_PREFIX", "solarflow-hyper")
 UID_PREFIX    = os.environ.get("UID_PREFIX", "hyper")
 # "product_id/device_id" pairs, comma separated; empty = listen to everything
 DEVICES = [tuple(d.strip().split("/", 1)) for d in os.environ.get("DEVICES", "").split(",") if "/" in d]
+# No report for this long -> status offline, so HA shows "unavailable" instead of stale retained values
+STALE_AFTER   = 4 * POLL_INTERVAL
 
 # product_id -> (device name prefix, model)
 PRODUCTS = {
@@ -61,12 +63,24 @@ def send_poll(client, product_id, device_id):
     )
 
 
+def check_stale(client, now):
+    for device_id, info in list(discovered_devices.items()):
+        if info["online"] and now - info["last_seen"] > STALE_AFTER:
+            info["online"] = False
+            client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "offline", retain=True)
+            log.warning(f"No report from {device_id} for {STALE_AFTER}s - marked offline")
+
+
 def poll_devices(client):
     while True:
         time.sleep(POLL_INTERVAL)
-        for device_id, info in list(discovered_devices.items()):
-            send_poll(client, info["product_id"], device_id)
+        # Configured devices too, so one that was silent at startup still gets asked
+        targets = {d: p for p, d in DEVICES}
+        targets.update({d: info["product_id"] for d, info in list(discovered_devices.items())})
+        for device_id, product_id in targets.items():
+            send_poll(client, product_id, device_id)
             log.debug(f"Polled {device_id}")
+        check_stale(client, time.monotonic())
 
 
 _STATE_TEMPLATE = "{{ 'Standby' if value=='0' else ('Laden' if value=='1' else ('Entladen' if value=='2' else 'Unknown')) }}"
@@ -287,7 +301,8 @@ def publish_ha_discovery_battery(client, device_id, sn):
 
 def register_device(client, device_id, product_id):
     if device_id not in discovered_devices:
-        discovered_devices[device_id] = {"product_id": product_id, "batteries": set(), "fields": set()}
+        discovered_devices[device_id] = {"product_id": product_id, "batteries": set(), "fields": set(),
+                                         "last_seen": time.monotonic(), "online": False}
         log.info(f"New device: {device_id} (product: {product_id})")
         if HA_DISCOVERY:
             publish_ha_discovery_status(client, device_id, product_id)
@@ -321,9 +336,18 @@ def register_battery(client, device_id, sn):
     return owner
 
 
+def mark_seen(client, device_id):
+    dev = discovered_devices[device_id]
+    dev["last_seen"] = time.monotonic()
+    if not dev["online"]:
+        dev["online"] = True
+        log.info(f"{device_id} reporting again" if dev["fields"] else f"{device_id} online")
+    client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "online", retain=True)
+
+
 def handle_report(client, product_id, device_id, payload):
     register_device(client, device_id, product_id)
-    client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "online", retain=True)
+    mark_seen(client, device_id)
 
     props = payload.get("properties", {})
     hidden = PRODUCT_HIDDEN.get(product_id, set())
@@ -352,6 +376,7 @@ def handle_report(client, product_id, device_id, payload):
 def handle_energy(client, product_id, device_id, payload):
     if device_id not in discovered_devices:
         return
+    mark_seen(client, device_id)
     props = payload.get("properties", {})
     hidden = PRODUCT_HIDDEN.get(product_id, set())
     for field in ["outputPower", "chargePower", "mode"]:
@@ -372,16 +397,19 @@ def on_connect(client, userdata, flags, reason_code, properties):
                     client.subscribe(f"{prefix}/{device_id}/telemetry/batteries/#")
                 log.info(f"Subscribed to: {product_id}/{device_id}")
                 send_poll(client, product_id, device_id)
-                client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "online", retain=True)
+                # Clears a retained "online" from before a restart; the first report sets it again
+                if device_id not in discovered_devices:
+                    client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "offline", retain=True)
         else:
             client.subscribe("+/+/properties/report")
             client.subscribe("+/+/properties/energy")
             client.subscribe("+/+/telemetry/batteries/#")
             log.warning("No devices configured - subscribing to all topics")
 
-        # Re-poll known devices
+        # Re-poll known devices and restate their status in case a publish got lost while disconnected
         for device_id, info in list(discovered_devices.items()):
             send_poll(client, info["product_id"], device_id)
+            client.publish(f"{OUTPUT_PREFIX}/{device_id}/status", "online" if info["online"] else "offline", retain=True)
     else:
         log.error(f"Connection failed rc={reason_code}")
 
@@ -416,6 +444,7 @@ def on_message(client, userdata, msg):
         sn    = parts[4]
         field = parts[5]
         register_device(client, device_id, product_id)
+        mark_seen(client, device_id)
         if not register_battery(client, device_id, sn):
             return
         client.publish(

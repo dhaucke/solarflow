@@ -92,4 +92,19 @@ assert list(c.pub) == ["solarflow-hyper/HUB1/status", "solarflow-hyper/HUB1/tele
 sf.on_message(c, None, Msg("gDa3tb/HYP1/properties/report", {"properties": {"outputLimit": 1}}))
 assert json.loads(c.pub["homeassistant/number/hyper_HYP1_outputLimit/config"])["device"]["name"] == "SolarFlow Hyper (HYP1)"
 
+# silent device goes offline (HA: unavailable), next report brings it back
+c.pub.clear()
+sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER - 1)
+assert "solarflow-hyper/ACE1/status" not in c.pub
+sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 1)
+assert c.pub["solarflow-hyper/ACE1/status"] == "offline"
+c.pub.clear()
+sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 99)
+assert "solarflow-hyper/ACE1/status" not in c.pub  # published once, not every poll
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"properties": {"gridInputPower": 6}}))
+assert c.pub["solarflow-hyper/ACE1/status"] == "online" and sf.discovered_devices["ACE1"]["online"]
+sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 1)
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/energy", {"properties": {"outputPower": 3}}))
+assert c.pub["solarflow-hyper/ACE1/status"] == "online"  # energy messages count as alive too
+
 print("ok")
