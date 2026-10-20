@@ -107,4 +107,10 @@ sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 
 sf.on_message(c, None, Msg("8bM93H/ACE1/properties/energy", {"properties": {"outputPower": 3}}))
 assert c.pub["solarflow-hyper/ACE1/status"] == "online"  # energy messages count as alive too
 
+# ACE acMode = app's "Netzstrom-Betriebsmodus": own labels, "Niemals ausschalten" writes acMode 2
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"properties": {"acMode": 1}}))
+ace_mode = json.loads(c.pub["homeassistant/select/hyper_ACE1_acMode/config"])
+assert ace_mode["options"] == ["Normal (aus nach 10 min)", "Niemals ausschalten", "Automatisch abschalten (Zeit)"]
+assert "'Niemals ausschalten' %}{\"properties\": {\"acMode\": 2}}" in ace_mode["command_template"]
+
 print("ok")

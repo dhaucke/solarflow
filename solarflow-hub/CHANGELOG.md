@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.3.0
+- ACE 1500: „AC Modus“ zeigt jetzt den Netzstrom-Betriebsmodus aus der Zendure-App: „Normal (aus nach 10 min)“, „Niemals ausschalten“, „Automatisch abschalten (Zeit)“. Im Modus „Normal“ schaltet sich der ACE bei weniger als ca. 20 W AC-Last nach 10 Minuten komplett ab und ist danach offline. Mit „Niemals ausschalten“ bleibt er dauerhaft verbunden. Bisher standen dort die Hyper-Bezeichnungen (Aus / AC Laden / AC Entladen).
+
 ## 1.2.0
 - Meldet ein Gerät (z. B. der ACE) länger als 4 Abfrageintervalle nichts, setzt das Add-on seinen Status auf offline: Die Entitäten in HA stehen dann auf „nicht verfügbar“ statt alte Werte weiter anzuzeigen. Mit dem nächsten Bericht ist das Gerät wieder online.
 - Konfigurierte Geräte werden jetzt auch dann regelmäßig abgefragt, wenn sie beim Start des Add-ons noch nicht geantwortet hatten.

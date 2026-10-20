@@ -45,6 +45,8 @@ Entitäten entstehen erst, wenn das Gerät das Feld meldet, typisch:
 - **Hub 2000:** Solar-/Pack-/Home-Leistung, Ladezustand, `outputLimit`, `inverseMaxPower`, SOC-Grenzen, Bypass-Modus, Buzzer, „ACE verbunden“
 - **ACE 1500:** Netzleistung (`gridInputPower`), DC-Ausgang, AC-/DC-Schalter, AC-Modus, `inputLimit` (0–900 W in 100er-Schritten)
 
+**ACE geht nach ca. 10 Minuten offline?** Beim ACE ist „AC Modus“ der Netzstrom-Betriebsmodus der Zendure-App. Steht er auf „Normal (aus nach 10 min)“, schaltet sich der ACE bei weniger als ca. 20 W AC-Last nach 10 Minuten ab. In HA auf „Niemals ausschalten“ stellen, solange der ACE online ist. (Zuordnung laut ioBroker-Forum, nicht von Zendure dokumentiert.)
+
 Werte, die der ACE vom Hub nur spiegelt (Akkustand, SOC-Grenzen, Restzeiten), zeigt das Addon nur beim Hub an; AC-Modus, `inputLimit` und die Batterien nur beim ACE. Der eigene Solar-Eingang des ACE heißt „ACE Solar Input Power“ bzw. „ACE Solar Power 1/2“.
 
 Topics: `solarflow-hub/<device_id>/telemetry/<feld>`, Status `solarflow-hub/<device_id>/status`.

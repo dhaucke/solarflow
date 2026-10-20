@@ -149,6 +149,10 @@ PROPERTY_FIELDS = {
 # Per-product deviations from PROPERTY_FIELDS
 PRODUCT_OVERRIDES = {
     "8bM93H": {"inputLimit":      {"max": 900, "step": 100},
+               # ACE: acMode is the app's "Netzstrom-Betriebsmodus" (ioBroker forum, not documented by Zendure);
+               # 1 switches the whole ACE off after 10 min below ~20 W AC load
+               "acMode":          {"options": {"1": "Normal (aus nach 10 min)", "2": "Niemals ausschalten",
+                                               "3": "Automatisch abschalten (Zeit)"}},
                # ACE has its own solar input, named apart from the hub's
                "solarInputPower": {"name": "ACE Solar Input Power"},
                "solarPower1":     {"name": "ACE Solar Power 1"},
