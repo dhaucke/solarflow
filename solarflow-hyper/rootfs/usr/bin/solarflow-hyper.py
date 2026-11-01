@@ -37,6 +37,8 @@ UID_PREFIX    = os.environ.get("UID_PREFIX", "hyper")
 DEVICES = [tuple(d.strip().split("/", 1)) for d in os.environ.get("DEVICES", "").split(",") if "/" in d]
 # No report for this long -> status offline, so HA shows "unavailable" instead of stale retained values
 STALE_AFTER   = 4 * POLL_INTERVAL
+# Hub feeds the ACE's batteries after this much ACE silence - before their values expire (STALE_AFTER)
+HANDOVER_AFTER = 2 * POLL_INTERVAL + 5
 
 # product_id -> (device name prefix, model)
 PRODUCTS = {
@@ -45,6 +47,8 @@ PRODUCTS = {
     "73bkTV": ("SolarFlow Hub 1200", "Hub 1200"),
     "8bM93H": ("ACE 1500",           "ACE 1500"),
 }
+
+ACE_PRODUCT = "8bM93H"
 
 discovered_devices = {}
 _msg_id = 0
@@ -164,7 +168,8 @@ PRODUCT_OVERRIDES = {
 PRODUCT_HIDDEN = {
     "8bM93H": {"socSet", "minSoc", "autoModel", "electricLevel", "outputPackPower", "packInputPower",
                "packNum", "packState", "remainOutTime", "remainInputTime"},
-    # ACE is the AC charger and the packs sit on it, so these belong to it
+    # ACE is the AC charger and the packs sit on it, so these belong to it. packData: the hub's copy
+    # is only used while no ACE is online (or there is none at all), see battery_home()
     "A8yh63": {"acMode", "inputLimit", "packData"},
 }
 
@@ -298,7 +303,14 @@ def publish_ha_discovery_battery(client, device_id, sn):
     for field, cfg in BATTERY_FIELDS.items():
         unique_id = f"{UID_PREFIX}_{device_id}_bat_{sn}_{field}"
         p = base_payload(cfg, unique_id, f"{OUTPUT_PREFIX}/{device_id}/telemetry/batteries/{sn}/{field}",
-                         dev_info, f"{OUTPUT_PREFIX}/{device_id}/status")
+                         dev_info, None)
+        # No device availability: the hub may feed the ACE's batteries while the ACE is offline.
+        # HA itself marks them unavailable when neither sends data (also after a restart or crash).
+        for k in ("availability_topic", "payload_available", "payload_not_available"):
+            p.pop(k)
+        # shortcut: retained values replayed after an HA restart show for one more STALE_AFTER even if
+        # hub and ACE are both off; upgrade to non-retained battery telemetry if that ever matters
+        p["expire_after"] = STALE_AFTER
         client.publish(f"{HA_PREFIX}/sensor/{unique_id}/config", json.dumps(p), retain=True)
     log.info(f"HA discovery published for battery {sn}")
 
@@ -306,7 +318,8 @@ def publish_ha_discovery_battery(client, device_id, sn):
 def register_device(client, device_id, product_id):
     if device_id not in discovered_devices:
         discovered_devices[device_id] = {"product_id": product_id, "batteries": set(), "fields": set(),
-                                         "last_seen": time.monotonic(), "online": False}
+                                         "last_seen": time.monotonic(), "online": False,
+                                         "forgotten": set(), "with_ace": False, "pack_seen": {}}
         log.info(f"New device: {device_id} (product: {product_id})")
         if HA_DISCOVERY:
             publish_ha_discovery_status(client, device_id, product_id)
@@ -314,6 +327,12 @@ def register_device(client, device_id, product_id):
             for field in PRODUCT_HIDDEN.get(product_id, set()) & PROPERTY_FIELDS.keys():
                 client.publish(f"{HA_PREFIX}/{PROPERTY_FIELDS[field]['type']}/{UID_PREFIX}_{device_id}_{field}/config",
                                "", retain=True)
+        if product_id == ACE_PRODUCT:
+            # A hub that had to own the packs (no ACE known yet) hands them over
+            for other_id, other in list(discovered_devices.items()):
+                for sn in list(other["batteries"]):
+                    if other_id != device_id and battery_home(other_id) == device_id:
+                        forget_battery(client, other_id, sn)
 
 
 def publish_field(client, device_id, field, value):
@@ -324,20 +343,66 @@ def publish_field(client, device_id, field, value):
     client.publish(f"{OUTPUT_PREFIX}/{device_id}/telemetry/{field}", str(value), retain=True)
 
 
+def battery_home(device_id):
+    """Device whose battery entities show the packs: the ACE if one is configured or known, else the
+    reporting device itself (Hyper, or a Hub 2000 without ACE)."""
+    if "packData" not in PRODUCT_HIDDEN.get(discovered_devices[device_id]["product_id"], ()):
+        return device_id
+    configured = [d for p, d in DEVICES if p == ACE_PRODUCT]
+    if configured:
+        return configured[0]
+    # Not configured: only when the hub said it has an ACE and there is exactly one, else keep the packs
+    found = [d for d, i in discovered_devices.items() if i["product_id"] == ACE_PRODUCT]
+    return found[0] if discovered_devices[device_id]["with_ace"] and len(found) == 1 else device_id
+
+
 def register_battery(client, device_id, sn):
-    """Returns False if this device only mirrors the battery (its partner owns it)."""
     dev = discovered_devices[device_id]
-    owner = "packData" not in PRODUCT_HIDDEN.get(dev["product_id"], ())
     if sn not in dev["batteries"]:
         dev["batteries"].add(sn)
-        log.info(f"New battery: {sn} on {device_id}" + ("" if owner else " (mirrored, ignored)"))
-        if HA_DISCOVERY and owner:
+        log.info(f"New battery: {sn} on {device_id}")
+        if HA_DISCOVERY:
             publish_ha_discovery_battery(client, device_id, sn)
-        elif HA_DISCOVERY:
-            # Remove the duplicate entities earlier versions created for the mirror
-            for field in BATTERY_FIELDS:
-                client.publish(f"{HA_PREFIX}/sensor/{UID_PREFIX}_{device_id}_bat_{sn}_{field}/config", "", retain=True)
-    return owner
+
+
+def forget_battery(client, device_id, sn):
+    """Remove battery entities a device has (or earlier versions had) for packs that belong to its ACE."""
+    dev = discovered_devices[device_id]
+    dev["batteries"].discard(sn)
+    if sn in dev["forgotten"]:
+        return
+    dev["forgotten"].add(sn)
+    if HA_DISCOVERY:
+        for field in BATTERY_FIELDS:
+            client.publish(f"{HA_PREFIX}/sensor/{UID_PREFIX}_{device_id}_bat_{sn}_{field}/config", "", retain=True)
+
+
+def handle_pack(client, device_id, sn, values):
+    """Publish pack values under the battery home. A hub fills in every field its ACE has not
+    delivered recently (ACE offline, or that value missing for HANDOVER_AFTER)."""
+    home = battery_home(device_id)
+    dev = discovered_devices[device_id]
+    values = {f: v for f, v in values.items() if f in BATTERY_FIELDS}
+    now = time.monotonic()
+    if home == device_id:
+        dev["pack_seen"].update({(sn, f): now for f in values})
+    else:
+        forget_battery(client, device_id, sn)
+        ace = discovered_devices.get(home, {})
+        seen = ace.get("pack_seen", {})
+        if ace.get("online"):
+            values = {f: v for f, v in values.items() if now - seen.get((sn, f), 0) > HANDOVER_AFTER}
+        if bool(values) != dev.get("standing_in", False):  # log only when the source changes
+            dev["standing_in"] = bool(values)
+            log.info(f"ACE {home} not delivering - battery values now come from {device_id}" if values
+                     else f"Battery values from ACE {home} again")
+        if not values:
+            return
+        if home not in discovered_devices:
+            register_device(client, home, ACE_PRODUCT)  # configured ACE that has not reported yet
+    register_battery(client, home, sn)
+    for field, value in values.items():
+        client.publish(f"{OUTPUT_PREFIX}/{home}/telemetry/batteries/{sn}/{field}", str(value), retain=True)
 
 
 def mark_seen(client, device_id):
@@ -354,6 +419,8 @@ def handle_report(client, product_id, device_id, payload):
     mark_seen(client, device_id)
 
     props = payload.get("properties", {})
+    if props.get("connectedWithAce") == 1:
+        discovered_devices[device_id]["with_ace"] = True  # sticky: an offline ACE may report 0
     hidden = PRODUCT_HIDDEN.get(product_id, set())
     for field in PROPERTY_FIELDS:
         if field in props and field not in hidden:
@@ -363,18 +430,8 @@ def handle_report(client, product_id, device_id, payload):
             publish_field(client, device_id, field, value)
 
     for pack in payload.get("packData", []):
-        sn = pack.get("sn")
-        if not sn:
-            continue
-        if not register_battery(client, device_id, sn):
-            continue
-        for field in BATTERY_FIELDS:
-            if field in pack:
-                client.publish(
-                    f"{OUTPUT_PREFIX}/{device_id}/telemetry/batteries/{sn}/{field}",
-                    str(pack[field]),
-                    retain=True
-                )
+        if pack.get("sn"):
+            handle_pack(client, device_id, pack["sn"], pack)
 
 
 def handle_energy(client, product_id, device_id, payload):
@@ -449,13 +506,7 @@ def on_message(client, userdata, msg):
         field = parts[5]
         register_device(client, device_id, product_id)
         mark_seen(client, device_id)
-        if not register_battery(client, device_id, sn):
-            return
-        client.publish(
-            f"{OUTPUT_PREFIX}/{device_id}/telemetry/batteries/{sn}/{field}",
-            msg.payload.decode("utf-8"),
-            retain=True
-        )
+        handle_pack(client, device_id, sn, {field: msg.payload.decode("utf-8")})
 
 
 def main():

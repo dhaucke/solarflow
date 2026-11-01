@@ -43,10 +43,12 @@ sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {
     "properties": {"outputLimit": 300, "passMode": 1, "remainOutTime": 59999, "connectedWithAce": 1},
     "packData": [{"sn": "CO4FCCCC111111", "socLevel": 80}],
 }))
-# hub only mirrors the packs on the ACE: old entities removed, no telemetry
-assert c.pub["homeassistant/sensor/hyper_HUB1_bat_CO4FCCCC111111_socLevel/config"] == ""
-assert "solarflow-hyper/HUB1/telemetry/batteries/CO4FCCCC111111/socLevel" not in c.pub
+# no ACE known yet: the hub owns its packs (Hub 2000 without ACE)
+assert c.pub["solarflow-hyper/HUB1/telemetry/batteries/CO4FCCCC111111/socLevel"] == "80"
+assert "homeassistant/sensor/hyper_HUB1_bat_CO4FCCCC111111_socLevel/config" in c.pub
 sf.on_message(c, None, Msg("/8bM93H/ACE1/properties/report", {"properties": {"inputLimit": 400, "dcSwitch": 1}}))
+# ACE appears: the hub hands its battery entities over (empty config removes them)
+assert c.pub["homeassistant/sensor/hyper_HUB1_bat_CO4FCCCC111111_socLevel/config"] == ""
 
 # only reported fields get discovered, filtered value neither
 assert "homeassistant/number/hyper_HUB1_outputLimit/config" in c.pub
@@ -78,6 +80,13 @@ assert json.loads(c.pub["homeassistant/sensor/hyper_ACE1_bat_CO4FBBBB654321_socL
 assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "70"
 sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"properties": {"acMode": 1}}))
 assert "solarflow-hyper/HUB1/telemetry/acMode" not in c.pub
+bat_cfg = json.loads(c.pub["homeassistant/sensor/hyper_ACE1_bat_CO4FBBBB654321_socLevel/config"])
+assert "availability_topic" not in bat_cfg and bat_cfg["expire_after"] == sf.STALE_AFTER
+
+# ACE online: the hub's copy of the packs is ignored
+sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 11}]}))
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "70"
+assert "solarflow-hyper/HUB1/telemetry/batteries/CO4FBBBB654321/socLevel" not in c.pub
 
 # battery name from serial, independent of order
 bat = json.loads(c.pub["homeassistant/sensor/hyper_HYP0_bat_CO4FBBBB654321_socLevel/config"])
@@ -106,6 +115,46 @@ assert c.pub["solarflow-hyper/ACE1/status"] == "online" and sf.discovered_device
 sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 1)
 sf.on_message(c, None, Msg("8bM93H/ACE1/properties/energy", {"properties": {"outputPower": 3}}))
 assert c.pub["solarflow-hyper/ACE1/status"] == "online"  # energy messages count as alive too
+
+# ACE offline: the hub feeds the SAME battery entities on the ACE (topics and unique_id unchanged)
+sf.check_stale(c, sf.discovered_devices["ACE1"]["last_seen"] + sf.STALE_AFTER + 1)
+assert c.pub["solarflow-hyper/ACE1/status"] == "offline"
+c.pub.clear()
+sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 55}]}))
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "55"
+assert not any("HUB1/telemetry/batteries" in t or "hyper_HUB1_bat" in t for t in c.pub)
+assert not any(t.startswith("homeassistant/sensor/hyper_ACE1_bat") for t in c.pub)  # no new entities
+# ACE back: it reports the packs again, the hub steps back
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 56}]}))
+sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 1}]}))
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "56"
+
+# ACE silent for HANDOVER_AFTER (not yet offline): hub already stands in, so batteries never expire
+for key in sf.discovered_devices["ACE1"]["pack_seen"]:
+    sf.discovered_devices["ACE1"]["pack_seen"][key] -= sf.HANDOVER_AFTER + 1
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"properties": {"gridInputPower": 7}}))  # alive, no packs
+assert sf.discovered_devices["ACE1"]["online"]
+sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 57}]}))
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "57"
+assert sf.HANDOVER_AFTER < sf.STALE_AFTER
+# partial: ACE delivers socLevel, but not power -> hub fills power only
+sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 58}]}))
+sf.on_message(c, None, Msg("A8yh63/HUB1/properties/report", {"packData": [{"sn": "CO4FBBBB654321", "socLevel": 1, "power": 120}]}))
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/socLevel"] == "58"
+assert c.pub["solarflow-hyper/ACE1/telemetry/batteries/CO4FBBBB654321/power"] == "120"
+
+# auto mode: a hub that never reported connectedWithAce=1 keeps its own packs even with an ACE around
+sf.on_message(c, None, Msg("A8yh63/HUB2/properties/report", {"packData": [{"sn": "CO4FEEEE333333", "socLevel": 33}]}))
+assert c.pub["solarflow-hyper/HUB2/telemetry/batteries/CO4FEEEE333333/socLevel"] == "33"
+
+# ACE configured but silent since start: hub feeds the ACE battery entities right away
+sf.DEVICES = [("A8yh63", "HUB9"), ("8bM93H", "ACE9")]
+sf.on_message(c, None, Msg("A8yh63/HUB9/properties/report", {"packData": [{"sn": "CO4FDDDD222222", "socLevel": 42}]}))
+assert c.pub["solarflow-hyper/ACE9/telemetry/batteries/CO4FDDDD222222/socLevel"] == "42"
+assert json.loads(c.pub["homeassistant/sensor/hyper_ACE9_bat_CO4FDDDD222222_socLevel/config"])["device"]["via_device"] == "ACE9"
+assert "homeassistant/sensor/hyper_HUB9_bat_CO4FDDDD222222_socLevel/config" in c.pub  # old hub entity removed
+assert c.pub["homeassistant/sensor/hyper_HUB9_bat_CO4FDDDD222222_socLevel/config"] == ""
+sf.DEVICES = []
 
 # ACE acMode = app's "Netzstrom-Betriebsmodus": own labels, "Niemals ausschalten" writes acMode 2
 sf.on_message(c, None, Msg("8bM93H/ACE1/properties/report", {"properties": {"acMode": 1}}))

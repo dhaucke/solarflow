@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.0
+- Batterien automatisch vom Hub, wenn der ACE fehlt: Ist der ACE offline (oder gar nicht vorhanden), kommen die Batteriewerte aus den Daten des Hub 2000. Die Batterie-Entitäten bleiben dieselben (am ACE), nur die Quelle wechselt; ist der ACE zurück, liefert wieder er. Hub 2000 ohne ACE zeigt seine Batterien jetzt selbst an.
+- Batterien gehen nicht mehr mit dem ACE auf „nicht verfügbar“, sondern erst, wenn 4 Abfrageintervalle lang weder Hub noch ACE Werte liefern (HA `expire_after`, greift auch nach Neustart).
+- Ohne eingetragene `ace_device_id` übernimmt ein gefundener ACE die Batterien nur, wenn der Hub „mit ACE verbunden“ meldet.
+
 ## 1.3.0
 - ACE 1500: „AC Modus“ zeigt jetzt den Netzstrom-Betriebsmodus aus der Zendure-App: „Normal (aus nach 10 min)“, „Niemals ausschalten“, „Automatisch abschalten (Zeit)“. Im Modus „Normal“ schaltet sich der ACE bei weniger als ca. 20 W AC-Last nach 10 Minuten komplett ab und ist danach offline. Mit „Niemals ausschalten“ bleibt er dauerhaft verbunden. Bisher standen dort die Hyper-Bezeichnungen (Aus / AC Laden / AC Entladen).
 
